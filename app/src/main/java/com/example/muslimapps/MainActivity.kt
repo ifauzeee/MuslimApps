@@ -5,7 +5,6 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -57,32 +56,27 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.room.Room
+import androidx.hilt.navigation.compose.hiltViewModel
 import com.airbnb.lottie.compose.*
 import com.example.muslimapps.data.*
+import com.example.muslimapps.ui.QuranViewModel
 import com.example.muslimapps.ui.theme.*
 import com.google.android.gms.location.LocationServices
+import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
 import java.text.NumberFormat
 import java.util.*
 
+@AndroidEntryPoint
 class MainActivity : ComponentActivity() {
-    private lateinit var db: QuranDatabase
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        db = Room.databaseBuilder(applicationContext, QuranDatabase::class.java, "quran-db")
-            .fallbackToDestructiveMigration().build()
-        
         val sharedPref = getSharedPreferences("MuslimAppsSettings", Context.MODE_PRIVATE)
         
         setContent {
             var isDarkMode by remember { mutableStateOf(sharedPref.getBoolean("isDarkMode", false)) }
             MuslimAppsTheme(darkTheme = isDarkMode) {
                 MainNavigation(
-                    db = db,
                     isDarkMode = isDarkMode,
                     onThemeToggle = { 
                         isDarkMode = it
@@ -95,7 +89,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun MainNavigation(db: QuranDatabase, isDarkMode: Boolean, onThemeToggle: (Boolean) -> Unit) {
+fun MainNavigation(
+    isDarkMode: Boolean, 
+    onThemeToggle: (Boolean) -> Unit,
+    quranViewModel: QuranViewModel = hiltViewModel()
+) {
     var currentScreen by remember { mutableStateOf("dashboard") }
     var prayerTimesData by remember { mutableStateOf<Timings?>(null) }
     var selectedSurahId by remember { mutableStateOf<Int?>(null) }
@@ -117,9 +115,21 @@ fun MainNavigation(db: QuranDatabase, isDarkMode: Boolean, onThemeToggle: (Boole
                     onNavigateToCalendar = { currentScreen = "calendar" },
                     onDataLoaded = { prayerTimesData = it }
                 )
-                "quran" -> QuranScreen(db = db, onBack = { currentScreen = "dashboard" },
-                    onSurahClick = { id, name -> selectedSurahId = id; selectedSurahName = name; currentScreen = "quran_detail" })
-                "quran_detail" -> SurahDetailScreen(db = db, surahId = selectedSurahId ?: 1, surahName = selectedSurahName, onBack = { currentScreen = "quran" })
+                "quran" -> QuranScreen(
+                    viewModel = quranViewModel,
+                    onBack = { currentScreen = "dashboard" },
+                    onSurahClick = { id, name -> 
+                        selectedSurahId = id
+                        selectedSurahName = name
+                        currentScreen = "quran_detail" 
+                    }
+                )
+                "quran_detail" -> SurahDetailScreen(
+                    viewModel = quranViewModel,
+                    surahId = selectedSurahId ?: 1,
+                    surahName = selectedSurahName,
+                    onBack = { currentScreen = "quran" }
+                )
                 "kiblat" -> KiblatScreen(onBack = { currentScreen = "dashboard" })
                 "tasbih" -> TasbihScreen(onBack = { currentScreen = "dashboard" })
                 "doa" -> DoaScreen(onBack = { currentScreen = "dashboard" })
@@ -155,7 +165,7 @@ fun DashboardScreen(
                 location?.let {
                     scope.launch {
                         try {
-                            val retrofit = Retrofit.Builder().baseUrl("https://api.aladhan.com/").addConverterFactory(GsonConverterFactory.create()).build()
+                            val retrofit = retrofit2.Retrofit.Builder().baseUrl("https://api.aladhan.com/").addConverterFactory(retrofit2.converter.gson.GsonConverterFactory.create()).build()
                             val api = retrofit.create(PrayerApi::class.java)
                             val response = api.getPrayerTimings(it.latitude, it.longitude)
                             prayerTimes = response.data.timings
@@ -254,25 +264,20 @@ fun DailyHadithSection(hadith: String) {
 }
 
 @Composable
-fun QuranScreen(db: QuranDatabase, onBack: () -> Unit, onSurahClick: (Int, String) -> Unit) {
+fun QuranScreen(
+    viewModel: QuranViewModel,
+    onBack: () -> Unit, 
+    onSurahClick: (Int, String) -> Unit
+) {
     val context = LocalContext.current
     val sharedPref = context.getSharedPreferences("MuslimAppsSettings", Context.MODE_PRIVATE)
     val lastSurahId = sharedPref.getInt("lastSurahId", -1)
     val lastSurahName = sharedPref.getString("lastSurahName", "")
-    var surahs by remember { mutableStateOf<List<Surah>>(emptyList()) }
-    val scope = rememberCoroutineScope()
+    
+    val surahs by viewModel.surahs.collectAsState()
 
     LaunchedEffect(Unit) {
-        scope.launch {
-            val localSurahs = db.quranDao().getAllSurahs()
-            if (localSurahs.isNotEmpty()) { surahs = localSurahs }
-            else {
-                // In real app, fetch from API and save to DB
-                val mockSurahs = listOf(Surah(1, "Al-Fatihah", "The Opening", 7, "Meccan"), Surah(2, "Al-Baqarah", "The Cow", 286, "Medinan"))
-                db.quranDao().insertSurahs(mockSurahs)
-                surahs = mockSurahs
-            }
-        }
+        viewModel.loadSurahs()
     }
 
     Scaffold(topBar = { Column(modifier = Modifier.background(MaterialTheme.colorScheme.surface)) { Row(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBackIosNew, null, modifier = Modifier.size(20.dp)) }; Text("Al-Quran Digital", fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), textAlign = TextAlign.Center); IconButton(onClick = {}) { Icon(Icons.Default.Search, null) } }; HorizontalDivider() } }) { padding ->
@@ -294,28 +299,19 @@ fun SurahItemCard(surah: Surah, onClick: () -> Unit) {
 }
 
 @Composable
-fun SurahDetailScreen(db: QuranDatabase, surahId: Int, surahName: String, onBack: () -> Unit) {
-    val context = LocalContext.current
-    var ayahs by remember { mutableStateOf<List<AyahEntity>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
-    val scope = rememberCoroutineScope()
+fun SurahDetailScreen(
+    viewModel: QuranViewModel,
+    surahId: Int, 
+    surahName: String, 
+    onBack: () -> Unit
+) {
+    val ayahs by viewModel.ayahs.collectAsState()
+    val isLoading by viewModel.isLoading.collectAsState()
     val mediaPlayer = remember { MediaPlayer() }
     var currentPlayingId by remember { mutableIntStateOf(-1) }
 
     LaunchedEffect(surahId) {
-        scope.launch {
-            val localAyahs = db.quranDao().getAyahsForSurah(surahId)
-            if (localAyahs.isNotEmpty()) { ayahs = localAyahs; isLoading = false }
-            else {
-                try {
-                    val retrofit = Retrofit.Builder().baseUrl("https://api.alquran.cloud/").addConverterFactory(GsonConverterFactory.create()).build()
-                    val api = retrofit.create(QuranApi::class.java)
-                    val response = api.getSurahDetail(surahId)
-                    val entities = response.data[0].ayahs.indices.map { i -> AyahEntity(surahId = surahId, numberInSurah = response.data[0].ayahs[i].numberInSurah, text = response.data[0].ayahs[i].text, translation = response.data[1].ayahs[i].text) }
-                    db.quranDao().insertAyahs(entities); ayahs = entities; isLoading = false
-                } catch (e: Exception) { isLoading = false }
-            }
-        }
+        viewModel.loadAyahs(surahId)
     }
 
     DisposableEffect(Unit) { onDispose { mediaPlayer.release() } }
